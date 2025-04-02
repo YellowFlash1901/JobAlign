@@ -8,16 +8,22 @@ from pdfminer.high_level import extract_text
 import docx2txt
 import re
 from dotenv import load_dotenv
+from groq import Groq
 
 # Load environment variables from .env file
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
+api_key = os.getenv("GROQ_API_KEY") 
 intents = discord.Intents.default()
 intents.message_content = True  # Needed to read message content in most cases
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 app = FastAPI()
+
+client = Groq(
+    api_key=os.environ.get("GROQ_API_KEY"),
+)
 
 # Start Discord bot in background
 @app.on_event("startup")
@@ -56,33 +62,84 @@ async def on_message(message):
     # Check if message has attachments
     if message.attachments:
         for attachment in message.attachments:
-            file_path = os.path.join(SAVE_FOLDER, attachment.filename)
+            # Validate file type
+            if not is_supported_file(attachment.filename):
+                await message.channel.send(f"❌ Unsupported file type: {attachment.filename}")
+                continue
 
-            # Create folder if it doesn't exist
-            os.makedirs(SAVE_FOLDER, exist_ok=True)
+            try:
+                # Save the attachment
+                file_path = await save_attachment(attachment, SAVE_FOLDER)
 
-            # Download the file
-            await attachment.save(file_path)
-            await message.channel.send(f"📥 File `{attachment.filename}` saved!")
+                # Parse the resume
+                skills = await parse_resume(file_path)
+
+                # Construct messages for the AI model
+                messages = construct_messages(skills)
+
+                # Call the AI model
+                completion = client.chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages=messages,
+                    temperature=0.6,
+                    max_completion_tokens=500,
+                    top_p=0.95
+                )
+                ai_response = completion.choices[0].message.content
+                cleaned_response = ai_response.replace("\n", "")
+                print("cleaned_response",cleaned_response)
+                # Send the result to the channel
+                await message.channel.send(
+                    f"📥 File `{attachment.filename}` saved!\n"
+                    f"**Skills:** {skills['skills']}\n"
+                    f"**Job Titles:** {cleaned_response}\n"
+                )
+            except Exception as e:
+                await message.channel.send(f"❌ Failed to process the file `{attachment.filename}`: {str(e)}")
 
 
-@app.post("/parse_resume")
-async def parse_resume(file: UploadFile = File(...)):
-    # Save the uploaded file temporarily
-    file_location = f"temp_{file.filename}"
-    with open(file_location, "wb") as f:
-        f.write(await file.read())
-    
-    # Process the file using resumeparse
+async def parse_resume(file_location):
+
     data = extract_resume_data(file_location)
     print("data",data)
     skills = extract_skills(data)
-    os.remove(file_location)
     
     return skills
 
-# if __name__ == "__main__":
-#     uvicorn.run("main:app", host="0.0.0.0", port=8000)
+def is_supported_file(filename):
+    supported_extensions = ['.pdf', '.docx', '.doc']
+    ext = os.path.splitext(filename)[1].lower()
+    return ext in supported_extensions
+
+async def save_attachment(attachment, save_folder):
+    file_path = os.path.join(save_folder, attachment.filename)
+    os.makedirs(save_folder, exist_ok=True)
+    await attachment.save(file_path)
+    return file_path
+
+def construct_messages(skills):
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are a helpful assistant that analyzes a candidate's skills, work experience, "
+                "and projects to suggest roles they are qualified for. "
+                "Strictly return a JSON list of job titles without any additional explanation or reasoning also do not repeat job titles and return the top 5 most relevant jobtitles."
+            )
+        },
+        {
+            "role": "user",
+            "content": f"""
+            Skills: {', '.join(skills['skills'])}
+            Experience: {', '.join(skills['work_experience'])}
+            Projects: {', '.join(skills['projects'])}
+
+            What job titles am I qualified for?
+            Please provide a JSON list of job titles only.
+            Example: ["Software Engineer", "Data Scientist"]
+            """
+        }
+    ]
 
 def extract_resume_data(file_path):
     try:
@@ -145,3 +202,5 @@ def extract_skills(cv_text):
         extracted[section] = "\n".join(extracted[section]).strip()
     
     return extracted
+
+
