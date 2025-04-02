@@ -42,6 +42,30 @@ async def send_message(channel_id: int, message: str):
 async def ping(ctx):
     await ctx.send("Pong!")
 
+# Set your desired save folder
+SAVE_FOLDER = "downloads"
+
+
+@bot.event
+async def on_message(message):
+    print(f"Received message: {message}")
+    # Prevent the bot from responding to itself
+    if message.author == bot.user:
+        return
+
+    # Check if message has attachments
+    if message.attachments:
+        for attachment in message.attachments:
+            file_path = os.path.join(SAVE_FOLDER, attachment.filename)
+
+            # Create folder if it doesn't exist
+            os.makedirs(SAVE_FOLDER, exist_ok=True)
+
+            # Download the file
+            await attachment.save(file_path)
+            await message.channel.send(f"📥 File `{attachment.filename}` saved!")
+
+
 @app.post("/parse_resume")
 async def parse_resume(file: UploadFile = File(...)):
     # Save the uploaded file temporarily
